@@ -28,17 +28,18 @@ func main() {
 	FindFiles(`D:\1C_Log\Lazarenko`)
 }
 
-func runWorkers(count int, inChan <-chan *string, outChan chan<- map[string]*Data) {
+func runWorkers(count int, inChan <-chan *string, outChan chan<- map[string]*Data, group *sync.WaitGroup) {
 	for i := 0; i < count; i++ {
-		go startWorker(inChan, outChan)
+		group.Add(1)
+		go startWorker(inChan, outChan, group)
 	}
 }
 
-func startWorker(inChan <-chan *string, outChan chan<- map[string]*Data) {
-	for input := range inChan {
-		outData := ParsPart(input)
-		outChan <- outData
+func startWorker(inChan <-chan *string, outChan chan<- map[string]*Data, group *sync.WaitGroup) {
+	defer group.Done()
 
+	for input := range inChan {
+		outChan <- ParsPart(input)
 		runtime.Gosched() // Передаем управление другой горутине.
 	}
 }
@@ -59,7 +60,7 @@ func FindFiles(rootDir string) {
 		return nil
 	}
 
-	filepath.Walk(rootDir, callBack)
+	filepath.Walk(rootDir, callBack) // Поиск файлов.
 	group.Wait()
 
 	elapsed := time.Now().Sub(start)
@@ -67,13 +68,8 @@ func FindFiles(rootDir string) {
 }
 
 func goReader(outChan <-chan map[string]*Data) {
-	select {
-	case dataOut := <-outChan:
-		for input := range dataOut {
-			fmt.Printf("%#v", input)
-		}
-	default:
-		fmt.Println("Нет значения в канале")
+	for input := range outChan {
+		PrettyPrint(input)
 	}
 }
 
@@ -83,6 +79,7 @@ func ParsFile(FilePath string, group *sync.WaitGroup) {
 	//data := make(map[string]*Data)
 	inChan := make(chan *string, 10)
 	outChan := make(chan map[string]*Data, 10)
+	localgroup := &sync.WaitGroup{} // Группа для ожидания выполнения пула воркеров.
 
 	pattern := `(?mi)\d\d:\d\d\.\d+[-]\d+`
 	re := regexp.MustCompile(pattern)
@@ -92,7 +89,7 @@ func ParsFile(FilePath string, group *sync.WaitGroup) {
 	if file, er := os.Open(FilePath); er != nil {
 		fmt.Printf("Ошибка открытия файла %v\n\t%v", FilePath, er.Error())
 	} else {
-		runWorkers(10, inChan, outChan)
+		runWorkers(10, inChan, outChan, localgroup)
 		go goReader(outChan) // Отдельная горутина которая будет читать из канала.
 
 		Scan := bufio.NewScanner(file)
@@ -118,8 +115,10 @@ func ParsFile(FilePath string, group *sync.WaitGroup) {
 
 			ok = Scan.Scan()
 		}
-
 		close(inChan)
+
+		localgroup.Wait()
+		close(outChan)
 		//PrettyPrint(data)
 	}
 
