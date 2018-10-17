@@ -3,11 +3,14 @@ package main
 import (
 	"bufio"
 	"crypto/md5"
+	"flag"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,8 +25,25 @@ type Data struct {
 	count   int
 }
 
+//type mapData map[string]*Data
+var FullData map[string]*Data
+var Mutex = &sync.Mutex{}
+var SortByCount, SortByValue bool
+var Top int
+
+/* var PoolData = sync.Pool{
+	New: func() interface{} {
+		return make(mapData)
+	},
+} */
+
 func main() {
-	//var FilePath string = `D:\1C_Log\КБР\1C_log\CALL_DB\rphost_6056\18100514_.log`
+	FullData = make(map[string]*Data)
+	flag.BoolVar(&SortByCount, "SortByCount", false, "Сортировка по количеству вызовов (bool)")
+	flag.BoolVar(&SortByValue, "SortByValue", false, "Сортировка по значению (bool)")
+	flag.IntVar(&Top, "Top", 100, "ограничение на вывод по количеству записей (int)")
+	flag.Parse()
+
 	//FindFiles(`D:\1C_Log\КБР\1C_log`)
 	FindFiles(`D:\1C_Log\Lazarenko`)
 }
@@ -42,6 +62,10 @@ func startWorker(inChan <-chan *string, outChan chan<- map[string]*Data, group *
 		outChan <- ParsPart(input)
 		runtime.Gosched() // Передаем управление другой горутине.
 	}
+}
+
+func (d *Data) Sort() {
+
 }
 
 func FindFiles(rootDir string) {
@@ -63,20 +87,37 @@ func FindFiles(rootDir string) {
 	filepath.Walk(rootDir, callBack) // Поиск файлов.
 	group.Wait()
 
+	PrettyPrint()
+
 	elapsed := time.Now().Sub(start)
 	fmt.Printf("Код выполнялся: %v\n", elapsed)
 }
 
 func goReader(outChan <-chan map[string]*Data) {
 	for input := range outChan {
-		PrettyPrint(input)
+		MergeData(input)
+	}
+}
+
+func MergeData(Data map[string]*Data) {
+	for key, value := range Data {
+		//FData := PoolData.Get().(map[string]*Data)
+
+		Mutex.Lock()
+		if _, exist := FullData[key]; exist {
+			FullData[key].value += value.value
+			FullData[key].count += value.count
+		} else {
+			FullData[key] = value
+		}
+		Mutex.Unlock()
+		//PoolData.Put(FData)
 	}
 }
 
 func ParsFile(FilePath string, group *sync.WaitGroup) {
 	defer group.Done()
 
-	//data := make(map[string]*Data)
 	inChan := make(chan *string, 10)
 	outChan := make(chan map[string]*Data, 10)
 	localgroup := &sync.WaitGroup{} // Группа для ожидания выполнения пула воркеров.
@@ -86,47 +127,68 @@ func ParsFile(FilePath string, group *sync.WaitGroup) {
 
 	var file *os.File
 	defer file.Close()
-	if file, er := os.Open(FilePath); er != nil {
+	file, er := os.Open(FilePath)
+
+	if er != nil {
 		fmt.Printf("Ошибка открытия файла %v\n\t%v", FilePath, er.Error())
-	} else {
-		runWorkers(10, inChan, outChan, localgroup)
-		go goReader(outChan) // Отдельная горутина которая будет читать из канала.
-
-		Scan := bufio.NewScanner(file)
-		buff := make([]string, 1)
-
-		for ok := Scan.Scan(); ok == true; {
-			txt := Scan.Text()
-			if ok := re.MatchString(txt); ok {
-				part := strings.Join(buff, "\n")
-				inChan <- &part
-
-				/* for input := range outChan {
-					fmt.Printf("%#v", input)
-				} */
-
-				//ParsPart(&part, data) // Отправляем в обработку строки от предыдущих итераций.
-				buff = nil
-				buff = append(buff, txt)
-			} else {
-				// Если мы в этом блоке, значит у нас многострочное событие, накапливаем строки в буфер
-				buff = append(buff, txt)
-			}
-
-			ok = Scan.Scan()
-		}
-		close(inChan)
-
-		localgroup.Wait()
-		close(outChan)
-		//PrettyPrint(data)
+		return
 	}
 
+	runWorkers(10, inChan, outChan, localgroup)
+	go goReader(outChan) // Отдельная горутина которая будет читать из канала.
+
+	Scan := bufio.NewScanner(file)
+	buff := make([]string, 1)
+	writeChan := func() {
+		part := strings.Join(buff, "\n")
+		inChan <- &part
+		buff = nil // Очищаем
+	}
+
+	for ok := Scan.Scan(); ok == true; {
+		txt := Scan.Text()
+		if ok := re.MatchString(txt); ok {
+			writeChan()
+			buff = append(buff, txt)
+		} else {
+			// Если мы в этом блоке, значит у нас многострочное событие, накапливаем строки в буфер
+			buff = append(buff, txt)
+		}
+
+		ok = Scan.Scan()
+	}
+	if len(buff) > 0 {
+		writeChan()
+	}
+
+	close(inChan) // Закрываем канал на для чтения
+
+	localgroup.Wait()
+	close(outChan)
 }
 
-func PrettyPrint(data map[string]*Data) {
-	for _, value := range data {
-		fmt.Printf("(%v) %v count - %v, duration - %v\n\t%v\n", value.db_Name, value.event, value.count, value.value, value.context)
+func PrettyPrint() {
+	//data := PoolData.Get().(map[string]*Data)
+
+	// переводим map в массив
+	len := len(FullData)
+	array := make([]*Data, len, len)
+	i := 0
+	for _, value := range FullData {
+		array[i] = value
+		i++
+	}
+
+	Top = int(math.Min(float64(Top), float64(len)))
+	if SortByCount {
+		SortCount := func(i, j int) bool { return array[i].count > array[j].count }
+		sort.Slice(array, SortCount)
+	} else if SortByValue {
+		SortValue := func(i, j int) bool { return array[i].value > array[j].value }
+		sort.Slice(array, SortValue)
+	}
+	for id := range array[:Top] {
+		fmt.Printf("(%v) %v count - %v, duration - %v\n\t%v\n", array[id].db_Name, array[id].event, array[id].count, array[id].value, array[id].context)
 	}
 }
 
@@ -175,38 +237,7 @@ func ParsPart(Blob *string) map[string]*Data {
 	result := Data{context: Context, db_Name: resultRegExp["DB"], event: resultRegExp["event"], count: 1}
 	result.value, _ = strconv.ParseInt(resultRegExp["Value"], 10, 64)
 
-	/* v := strings.Index(result.context, "ПолучитьПредставленияСсылок")
-	if v > 0 {
-		fmt.Print(v)
-	} */
-	//Hash := getHash(result.event + result.context)
-
-	// Если inData уже есть с таким хешем, тогда склидываем value
-	/* 	if _, exist := inData[Hash]; exist {
-	   		inData[Hash].value += inData[Hash].value
-	   		inData[Hash].count++
-	   	} else {
-	   		inData[Hash] = &result
-	   	} */
-
 	return map[string]*Data{getHash(result.context): &result}
-
-	/* if re.MatchString(Str) {
-		for _, submatches := range re.FindAllStringSubmatchIndex(Str, -1) {
-			DB, Context, event, value := []byte{}, []byte{}, []byte{}, []byte{}
-			DB = re.ExpandString(DB, "$DB", Str, submatches)
-			Context = re.ExpandString(Context, "$Context", Str, submatches)
-			event = re.ExpandString(event, "$event", Str, submatches)
-			value = re.ExpandString(value, "$Value", Str, submatches)
-			valueInt, _ := strconv.ParseInt(string(value), 10, 64)
-
-			v := Data{Context: string(Context),
-				value:   valueInt,
-				DB_Name: string(DB)}
-
-			fmt.Println(v)
-		}
-	} */
 }
 
 func getHash(inStr string) string {
