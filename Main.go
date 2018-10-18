@@ -23,6 +23,60 @@ type Data struct {
 	event   string
 	value   int64
 	count   int
+	OutStr  string
+}
+
+type IChain interface {
+	Execute(SourceStr string)
+}
+
+type Chain struct {
+	OutPattern     string
+	NextElement    *Chain
+	regexp         *regexp.Regexp
+	AgregateFileld []string
+}
+
+func (c *Chain) Execute(SourceStr string) (string, string, int64) {
+	exRegExp := func() map[string]string {
+		matches := c.regexp.FindStringSubmatch(SourceStr)
+		if len(matches) == 0 {
+			return nil
+		}
+
+		// GroupsName - для работы с именоваными группами захвата.
+		GroupsName := make(map[string]string)
+		for id, name := range c.regexp.SubexpNames() {
+			GroupsName[name] = matches[id]
+		}
+
+		return GroupsName
+	}
+
+	result := exRegExp()
+	if result == nil {
+		if c.NextElement != nil {
+			return c.NextElement.Execute(SourceStr)
+		}
+		return "", "", 0
+	}
+
+	var KeyStr string
+	var OutStr string = c.OutPattern
+	for k, v := range result {
+		for _, j := range c.AgregateFileld {
+			if j == k {
+				KeyStr += v
+			}
+		}
+
+		if k != "" {
+			OutStr = strings.Replace(OutStr, "%"+k+"%", strings.Trim(v, " \n"), -1)
+		}
+	}
+
+	v, _ := strconv.ParseInt(result["Value"], 10, 64)
+	return getHash(KeyStr), OutStr, v
 }
 
 //type mapData map[string]*Data
@@ -30,18 +84,14 @@ var FullData map[string]*Data
 var Mutex = &sync.Mutex{}
 var SortByCount, SortByValue bool
 var Top int
-
-/* var PoolData = sync.Pool{
-	New: func() interface{} {
-		return make(mapData)
-	},
-} */
+var Go int
 
 func main() {
 	FullData = make(map[string]*Data)
 	flag.BoolVar(&SortByCount, "SortByCount", false, "Сортировка по количеству вызовов (bool)")
 	flag.BoolVar(&SortByValue, "SortByValue", false, "Сортировка по значению (bool)")
-	flag.IntVar(&Top, "Top", 100, "ограничение на вывод по количеству записей (int)")
+	flag.IntVar(&Top, "Top", 100, "Ограничение на вывод по количеству записей (int)")
+	flag.IntVar(&Go, "Go", 10, "Количество воркеров которые будут обрабатывать файл (int)")
 	flag.Parse()
 
 	//FindFiles(`D:\1C_Log\КБР\1C_log`)
@@ -62,10 +112,6 @@ func startWorker(inChan <-chan *string, outChan chan<- map[string]*Data, group *
 		outChan <- ParsPart(input)
 		runtime.Gosched() // Передаем управление другой горутине.
 	}
-}
-
-func (d *Data) Sort() {
-
 }
 
 func FindFiles(rootDir string) {
@@ -118,8 +164,8 @@ func MergeData(Data map[string]*Data) {
 func ParsFile(FilePath string, group *sync.WaitGroup) {
 	defer group.Done()
 
-	inChan := make(chan *string, 10)
-	outChan := make(chan map[string]*Data, 10)
+	inChan := make(chan *string, Go)
+	outChan := make(chan map[string]*Data, Go)
 	localgroup := &sync.WaitGroup{} // Группа для ожидания выполнения пула воркеров.
 
 	pattern := `(?mi)\d\d:\d\d\.\d+[-]\d+`
@@ -134,7 +180,7 @@ func ParsFile(FilePath string, group *sync.WaitGroup) {
 		return
 	}
 
-	runWorkers(10, inChan, outChan, localgroup)
+	runWorkers(Go, inChan, outChan, localgroup)
 	go goReader(outChan) // Отдельная горутина которая будет читать из канала.
 
 	Scan := bufio.NewScanner(file)
@@ -168,8 +214,6 @@ func ParsFile(FilePath string, group *sync.WaitGroup) {
 }
 
 func PrettyPrint() {
-	//data := PoolData.Get().(map[string]*Data)
-
 	// переводим map в массив
 	len := len(FullData)
 	array := make([]*Data, len, len)
@@ -188,7 +232,12 @@ func PrettyPrint() {
 		sort.Slice(array, SortValue)
 	}
 	for id := range array[:Top] {
-		fmt.Printf("(%v) %v count - %v, duration - %v\n\t%v\n", array[id].db_Name, array[id].event, array[id].count, array[id].value, array[id].context)
+		OutStr := array[id].OutStr
+		OutStr = strings.Replace(OutStr, "%count%", fmt.Sprintf("%d", array[id].count), -1)
+		OutStr = strings.Replace(OutStr, "%value%", fmt.Sprintf("%d", array[id].value), -1)
+
+		fmt.Println(OutStr)
+		//fmt.Printf("(%v) %v count - %v, duration - %v\n\t%v\n", array[id].db_Name, array[id].event, array[id].count, array[id].value, array[id].context)
 	}
 }
 
@@ -198,46 +247,22 @@ func ParsPart(Blob *string) map[string]*Data {
 		return nil
 	}
 
-	exRegExp := func(pattern string) map[string]string {
-		re := regexp.MustCompile(pattern)
-
-		matches := re.FindStringSubmatch(Str)
-		if len(matches) == 0 {
-			return nil
-		}
-
-		// GroupsName - для работы с именоваными группами захвата.
-		GroupsName := make(map[string]string)
-		for id, name := range re.SubexpNames() {
-			GroupsName[name] = matches[id]
-		}
-
-		return GroupsName
+	Element0 := Chain{
+		regexp:         regexp.MustCompile(`(?si)[\d]+:[\d]+\.[\d]+[-](?P<Value>[\d]+)[,](?P<event>[^,]+)(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Module=(?P<Module>[^,]+)(?:.+?)Method=(?P<Method>[^,]+)`),
+		AgregateFileld: []string{"event", "DB", "Module", "Method"},
+		OutPattern:     "(%DB%) %event%, количество - %count%, duration - %value%\n%Module%.%Method%",
 	}
 
-	pattern := `(?si)[\d]+:[\d]+\.[\d]+[-](?P<Value>[\d]+)[,](?P<event>[^,]+)(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)(Context=(?P<Context>[^,]+))`
-	Add_pattern := `(?si)[\d]+:[\d]+\.[\d]+[-](?P<Value>[\d]+)[,](?P<event>[^,]+)(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Module=(?P<Module>[^,]+)(?:.+?)Method=(?P<Method>[^,]+)`
-	var resultRegExp map[string]string
-
-	if resultRegExp = exRegExp(pattern); resultRegExp == nil {
-		resultRegExp = exRegExp(Add_pattern)
-	}
-	if resultRegExp == nil {
-		return nil
-	}
-	var Context string
-	if _, exist := resultRegExp["Context"]; exist {
-		Context = resultRegExp["Context"]
-	} else if _, exist := resultRegExp["Method"]; exist {
-		Context = resultRegExp["Method"] + "." + resultRegExp["Method"]
-	} else {
-		return nil
+	Element1 := Chain{
+		regexp:         regexp.MustCompile(`(?si)[\d]+:[\d]+\.[\d]+[-](?P<Value>[\d]+)[,](?P<event>[^,]+)(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)(Context=(?P<Context>[^,]+))`),
+		NextElement:    &Element0,
+		AgregateFileld: []string{"event", "DB", "Context"},
+		OutPattern:     "(%DB%) %event%, количество - %count%, duration - %value%\n%Context%",
 	}
 
-	result := Data{context: Context, db_Name: resultRegExp["DB"], event: resultRegExp["event"], count: 1}
-	result.value, _ = strconv.ParseInt(resultRegExp["Value"], 10, 64)
-
-	return map[string]*Data{getHash(result.context): &result}
+	key, data, value := Element1.Execute(Str)
+	result := Data{OutStr: data, value: value, count: 1}
+	return map[string]*Data{getHash(key): &result}
 }
 
 func getHash(inStr string) string {
