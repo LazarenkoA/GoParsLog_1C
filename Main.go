@@ -81,9 +81,6 @@ func main() {
 		defer pprof.StopCPUProfile()
 	}
 
-	FindFiles(`D:\1C_Log\Lazarenko\CALL_SCALL_BD`)
-	return
-
 	if RootDir != "" {
 		FindFiles(RootDir)
 	} else if IO {
