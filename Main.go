@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"runtime/pprof"
 )
 
 type Data struct {
@@ -28,12 +30,17 @@ type Data struct {
 }
 
 type IChain interface {
-	Execute(SourceStr string)
+	Execute(SourceStr string) (string, string, int64)
+}
+
+type ImapData interface {
+	MergeData(inData ImapData)
 }
 
 type Chain struct {
 	OutPattern     string
 	NextElement    *Chain
+	preCondition   func(in string) bool
 	regexp         *regexp.Regexp
 	AgregateFileld []string
 }
@@ -44,25 +51,38 @@ var ChainPool = sync.Pool{
 	},
 }
 
-const AddSizeChan = 100
+type mapData map[string]*Data
 
-var SortByCount, SortByValue, IO bool
+const AddSizeChan = 10
+
+var SortByCount, SortByValue, IO, v bool
 var Top, Go int
 var RootDir string
-var DataBuffer [5][]map[string]*Data
 
 func main() {
-	//FullData = make(map[string]*Data)
 	flag.BoolVar(&SortByCount, "SortByCount", false, "Сортировка по количеству вызовов (bool)")
 	flag.BoolVar(&SortByValue, "SortByValue", false, "Сортировка по значению (bool)")
-	flag.BoolVar(&IO, "io", false, "Флаг того, что данные будут поступать из StdIn (bool)")
+	flag.BoolVar(&IO, "io", false, "Флаг указывающий, что данные будут поступать из StdIn (bool)")
+	//flag.BoolVar(&v, "v", false, "Флаг включающий вывод лога. Не используется при чтении данных из потока StdIn (bool)")
 	flag.IntVar(&Top, "Top", 100, "Ограничение на вывод по количеству записей")
 	flag.IntVar(&Go, "Go", 10, "Количество воркеров которые будут обрабатывать файл")
 	flag.StringVar(&RootDir, "RootDir", "", "Корневая директория")
+
+	cpuprofile := flag.Bool("cpuprof", false, "Профилирование CPU (bool)")
+	memprofile := flag.Bool("memprof", false, "Профилирование памяти (bool)")
 	flag.Parse()
 
-	//FindFiles(`D:\1C_Log\Lazarenko\CALL_SCALL_BD`)
-	//return
+	if *cpuprofile {
+		StartCPUProf()
+		defer pprof.StopCPUProfile()
+	}
+	if *memprofile {
+		StartMemProf()
+		defer pprof.StopCPUProfile()
+	}
+
+	FindFiles(`D:\1C_Log\Lazarenko\CALL_SCALL_BD`)
+	return
 
 	if RootDir != "" {
 		FindFiles(RootDir)
@@ -74,60 +94,203 @@ func main() {
 
 }
 
-//////////////////////////// Горутины ////////////////////////////////////////
+func readStdIn() {
+	mergeChan := make(chan mapData, Go*AddSizeChan)
+	mergeGroup := &sync.WaitGroup{}
 
-func goMergeData(outChan <-chan map[string]*Data, resultChan chan<- map[string]*Data, G *sync.WaitGroup) {
-	defer G.Done()
-
-	var Data = make(map[string]*Data)
-	for input := range outChan {
-		MergeData(input, Data)
-		//SerializationAndSave(input, TempDir)
-		runtime.Gosched() // Передаем управление другой горутине.
+	for i := 0; i < Go; i++ {
+		go goMergeData(mergeChan, mergeGroup)
 	}
-	resultChan <- Data
+
+	in := bufio.NewScanner(os.Stdin)
+	ParsStream(in, BuildChain(), mergeChan)
+
+	close(mergeChan)
+	mergeGroup.Wait()
 }
 
-func goPrettyPrint(resultChan <-chan map[string]*Data, G *sync.WaitGroup) {
+func ParsStream(Scan *bufio.Scanner, RepChain *Chain, mergeChan chan<- mapData) {
+
+	inChan := make(chan *string, Go*2) // канал в который будет писаться исходные данные для парсенга
+	WriteGroup := &sync.WaitGroup{}    // Група для ожидания завершения горутин работающих с каналом inChan
+	//RepChain := ChainPool.Get().(*Chain) // Объект который будет парсить
+
+	pattern := `(?mi)\d\d:\d\d\.\d+[-]\d+`
+	re := regexp.MustCompile(pattern)
+
+	for i := 0; i < Go; i++ {
+		go startWorker(inChan, mergeChan, WriteGroup, RepChain)
+	}
+
+	buff := make([]string, 1)
+	PushChan := func() {
+		part := strings.Join(buff, "\n")
+		inChan <- &part
+		buff = nil // Очищаем
+	}
+
+	for ok := Scan.Scan(); ok == true; {
+		txt := Scan.Text()
+		if ok := re.MatchString(txt); ok {
+			PushChan()
+			buff = append(buff, txt)
+		} else {
+			// Если мы в этом блоке, значит у нас многострочное событие, накапливаем строки в буфер
+			buff = append(buff, txt)
+		}
+
+		ok = Scan.Scan()
+	}
+	if len(buff) > 0 {
+		PushChan()
+	}
+
+	close(inChan) // Закрываем канал на для чтения
+	WriteGroup.Wait()
+}
+
+func PrettyPrint(inData mapData) {
+	//fmt.Print("\n============================\n\n")
+
+	// переводим map в массив
+	len := len(inData)
+	array := make([]*Data, len, len)
+	i := 0
+	for _, value := range inData {
+		array[i] = value
+		i++
+	}
+
+	Top = int(math.Min(float64(Top), float64(len)))
+	if SortByCount {
+		SortCount := func(i, j int) bool { return array[i].count > array[j].count }
+		sort.Slice(array, SortCount)
+	} else if SortByValue {
+		SortValue := func(i, j int) bool { return array[i].value > array[j].value }
+		sort.Slice(array, SortValue)
+	}
+	for id := range array[:Top] {
+		OutStr := array[id].OutStr
+		OutStr = strings.Replace(OutStr, "%count%", fmt.Sprintf("%d", array[id].count), -1)
+		OutStr = strings.Replace(OutStr, "%Value%", fmt.Sprintf("%d", array[id].value), -1)
+
+		fmt.Println(OutStr + "\n")
+	}
+}
+
+func ParsPart(Blob *string, RepChain IChain) mapData {
+	Str := *Blob
+	if Str == "" {
+		return nil
+	}
+	//return make(mapData)
+
+	key, data, value := RepChain.Execute(Str)
+	/* 	key := ""
+	   	data := ""
+	   	var value int64 = 0 */
+	result := Data{OutStr: data, value: value, count: 1}
+	return mapData{getHash(key): &result}
+}
+
+//////////////////////////// Профилирование //////////////////////////////////
+
+func StartCPUProf() {
+	f, err := os.Create("cpu.out")
+	//defer f.Close() нельзя иначе писаться не будет
+
+	if err != nil {
+		fmt.Println("Произошла ошибка при создании cpu.out: ", err)
+	}
+	if err := pprof.StartCPUProfile(f); err != nil {
+		fmt.Println("Не удалось запустить профилирование CPU: ", err)
+	}
+}
+
+func StartMemProf() {
+	f, err := os.Create("mem.out")
+	//defer f.Close()
+
+	if err != nil {
+		fmt.Println("Произошла ошибка при создании mem.out: ", err)
+	}
+
+	runtime.GC() // get up-to-date statistics
+	if err := pprof.WriteHeapProfile(f); err != nil {
+		fmt.Println("Не удалось запустить профилирование памяти: ", err)
+	}
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////// Горутины ////////////////////////////////////////
+
+func ReadInfoChan(infoChan <-chan int64, Fullsize *int64) {
+	for size := range infoChan {
+		fmt.Printf("\nОбработано %f%v", float64(size)/float64(*Fullsize)*100, `%`)
+		//*Fullsize = atomic.AddInt64(Fullsize, -size)
+	}
+}
+
+func goMergeData(outChan <-chan mapData, G *sync.WaitGroup) {
+	G.Add(1)
 	defer G.Done()
 
-	var resultData = make(map[string]*Data)
+	var Data = make(mapData)
+	for input := range outChan {
+		Data.MergeData(input)
+		runtime.Gosched() // Передаем управление другой горутине.
+	}
+
+	PrettyPrint(Data)
+}
+
+func goPrettyPrint(resultChan <-chan mapData, G *sync.WaitGroup) {
+	G.Add(1)
+	defer G.Done()
+
+	var resultData = make(mapData)
 	for input := range resultChan {
-		MergeData(input, resultData)
+		resultData.MergeData(input)
 	}
 
 	PrettyPrint(resultData)
 }
 
-func startWorker(inChan <-chan *string, outChan chan<- map[string]*Data, group *sync.WaitGroup) {
+func startWorker(inChan <-chan *string, outChan chan<- mapData, group *sync.WaitGroup, Chain *Chain) {
+	group.Add(1)
 	defer group.Done()
 
 	for input := range inChan {
-		outChan <- ParsPart(input)
+		outChan <- ParsPart(input, Chain)
 		runtime.Gosched() // Передаем управление другой горутине.
 	}
 }
 
-func ParsFile(FilePath string, mergeChan chan<- map[string]*Data, group *sync.WaitGroup) {
+func ParsFile(FilePath string, mergeChan chan<- mapData, infoChan chan<- int64, Chain *Chain, group *sync.WaitGroup) {
 	defer group.Done()
 
 	var file *os.File
 	defer file.Close()
 	file, er := os.Open(FilePath)
+	/*info, _ := file.Stat()
+	 if v {
+		defer func() { infoChan <- info.Size() }()
+	} */
 
 	if er != nil {
 		fmt.Printf("Ошибка открытия файла %q\n\t%v", FilePath, er.Error())
 		return
 	}
 
-	ParsStream(bufio.NewScanner(file), mergeChan)
+	ParsStream(bufio.NewScanner(file), Chain, mergeChan)
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
 ///////////////////////// Сериализация ///////////////////////////////////////
 
-func SerializationAndSave(inData map[string]*Data, TempDir string) {
+func (d *mapData) SerializationAndSave(TempDir string) {
 
 	file, err2 := os.Create(path.Join(TempDir, uuid()))
 	defer file.Close()
@@ -136,20 +299,20 @@ func SerializationAndSave(inData map[string]*Data, TempDir string) {
 		return
 	}
 
-	Serialization(inData, file)
+	d.Serialization(file)
 }
 
-func Serialization(inData map[string]*Data, outFile *os.File) {
+func (d *mapData) Serialization(outFile *os.File) {
 	Encode := gob.NewEncoder(outFile)
 
-	err := Encode.Encode(inData)
+	err := Encode.Encode(d)
 	if err != nil {
 		fmt.Println("Ошибка создания Encode:\n", err.Error())
 		return
 	}
 }
 
-func deSerialization(filePath string) (map[string]*Data, error) {
+func deSerialization(filePath string) (mapData, error) {
 	var file *os.File
 	file, err := os.Open(filePath)
 	defer os.Remove(filePath)
@@ -160,7 +323,7 @@ func deSerialization(filePath string) (map[string]*Data, error) {
 		return nil, err
 	}
 
-	var Data map[string]*Data
+	var Data mapData
 	Decoder := gob.NewDecoder(file)
 
 	err = Decoder.Decode(&Data)
@@ -176,31 +339,37 @@ func deSerialization(filePath string) (map[string]*Data, error) {
 
 //////////////////////// Системные методы ////////////////////////////////////
 
-func MergeData(inData map[string]*Data, outData map[string]*Data) {
+func (this mapData) MergeData(inData mapData) {
 	for k, value := range inData {
-		if _, exist := outData[k]; exist {
-			outData[k].value += value.value
-			outData[k].count += value.count
+		if _, exist := this[k]; exist {
+			this[k].value += value.value
+			this[k].count += value.count
 		} else {
-			outData[k] = value
+			this[k] = value
 		}
 	}
 }
 
-func GetFiles(DirPath string) []string {
+func (this mapData) GetObject() mapData {
+	return this
+}
+
+func GetFiles(DirPath string) ([]string, int64) {
 	var result []string
+	var size int64
 	f := func(path string, info os.FileInfo, err error) error {
 		if info.IsDir() || info.Size() == 0 {
 			return nil
 		} else {
 			result = append(result, path)
+			size += info.Size()
 		}
 
 		return nil
 	}
 
 	filepath.Walk(DirPath, f)
-	return result
+	return result, size
 }
 
 func uuid() string {
@@ -226,34 +395,38 @@ func ToUnify(inStr string) string {
 }
 
 func FindFiles(rootDir string) {
-
 	start := time.Now()
-	group := &sync.WaitGroup{}
-	mergeGroup := &sync.WaitGroup{}
-	resultGroup := &sync.WaitGroup{}
-	mergeChan := make(chan map[string]*Data, Go*AddSizeChan)
-	ResultChan := make(chan map[string]*Data, Go*AddSizeChan) // канал в который будет помещаться результат парсинга
+
+	group := new(sync.WaitGroup)                    // Группа для горутин по файлам
+	mergeGroup := new(sync.WaitGroup)               // Группа для горутин которые делают первичное объеденение
+	mergeChan := make(chan mapData, Go*AddSizeChan) // Канал в который будут помещаться данные от пула воркеров, для объеденения
+	infoChan := make(chan int64, 2)                 // Информационный канал, в него пишется размеры файлов
+	Files, size := GetFiles(rootDir)
+	Chain := BuildChain()
 
 	for i := 0; i < Go; i++ {
-		mergeGroup.Add(1)
-		go goMergeData(mergeChan, ResultChan, mergeGroup)
+		go goMergeData(mergeChan, mergeGroup)
+	}
+	//go goPrettyPrint(ResultChan, resultGroup)
+	//if v {
+	//	go ReadInfoChan(infoChan, &size)
+	//}
+
+	if v {
+		fmt.Printf("Поиск файлов в каталоге %q, общий размер (%v kb)", rootDir, size/1024)
 	}
 
-	resultGroup.Add(1)
-	go goPrettyPrint(ResultChan, resultGroup)
-
-	for _, File := range GetFiles(rootDir) {
+	for _, File := range Files {
 		if strings.HasSuffix(File, "log") {
 			group.Add(1)
-			go ParsFile(File, mergeChan, group)
+			go ParsFile(File, mergeChan, infoChan, Chain, group)
 		}
 	}
 
 	group.Wait()
 	close(mergeChan)
+	close(infoChan)
 	mergeGroup.Wait()
-	close(ResultChan)
-	resultGroup.Wait()
 
 	elapsed := time.Now().Sub(start)
 	fmt.Printf("Код выполнялся: %v\n", elapsed)
@@ -264,10 +437,10 @@ func FindFiles(rootDir string) {
 //////////////////////////// Цепочки /////////////////////////////////////////
 
 func BuildChain() *Chain {
-	Element0 := Chain{
-		regexp:         regexp.MustCompile(`(?si)[\d]+:[\d]+\.[\d]+[-](?P<Value>[\d]+)[,](?P<event>[^,]+)(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Module=(?P<Module>[^,]+)(?:.+?)Method=(?P<Method>[^,]+)`),
+	/* Element0 := Chain{
+		regexp:         regexp.MustCompile(`(?si)[\d]+:[\d]+\.[\d]+[-](?P<Value>[\d]+)[,]CALL(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Module=(?P<Module>[^,]+)(?:.+?)Method=(?P<Method>[^,]+)`),
 		AgregateFileld: []string{"event", "DB", "Module", "Method"},
-		OutPattern:     "(%DB%) %event%, количество - %count%, duration - %Value%\n%Module%.%Method%",
+		OutPattern:     "(%DB%) CALL, количество - %count%, duration - %Value%\n%Module%.%Method%",
 	}
 
 	Element1 := Chain{
@@ -275,18 +448,27 @@ func BuildChain() *Chain {
 		NextElement:    &Element0,
 		AgregateFileld: []string{"event", "DB", "Context"},
 		OutPattern:     "(%DB%) %event%, количество - %count%, duration - %Value%\n%Context%",
+	} */
+
+	Element1 := Chain{
+		//preCondition:   func(In string) bool { return strings.Contains(In, ",CALL") },
+		regexp:         regexp.MustCompile(`(?si)[,]CALL(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Module=(?P<Module>[^,]+)(?:.+?)Method=(?P<Method>[^,]+)(?:.+?)MemoryPeak=(?P<Value>[\d]+)`),
+		AgregateFileld: []string{"event", "DB", "Module", "Method"},
+		OutPattern:     "(%DB%) CALL, количество - %count%, MemoryPeak - %Value%\n%Module%.%Method%",
 	}
 
-	/* 	Element2 := Chain{
+	Element2 := Chain{
+		//preCondition:   func(In string) bool { return strings.Contains(In, ",CALL") },
 		regexp:         regexp.MustCompile(`(?si)[,]CALL(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Context=(?P<Context>[^,]+)(?:.+?)MemoryPeak=(?P<Value>[\d]+)`),
 		NextElement:    &Element1,
 		AgregateFileld: []string{"DB", "Context"},
 		OutPattern:     "(%DB%) CALL, количество - %count%, MemoryPeak - %Value%\n%Context%",
-	} */
+	}
 
 	Element3 := Chain{
+		//preCondition:   func(In string) bool { return strings.Contains(In, ",EXCP") },
 		regexp:         regexp.MustCompile(`(?si)[,]EXCP,(?:.*?)process=(?P<Process>[^,]+)(?:.*?)Descr=(?P<Context>[^,]+)`),
-		NextElement:    &Element1,
+		NextElement:    &Element2,
 		AgregateFileld: []string{"Process", "Context"},
 		OutPattern:     "(%Process%) EXCP, количество - %count%\n%Context%",
 	}
@@ -295,6 +477,9 @@ func BuildChain() *Chain {
 
 func (c *Chain) Execute(SourceStr string) (string, string, int64) {
 	exRegExp := func() map[string]string {
+		/* if !c.preCondition(SourceStr) {
+			return nil
+		} */
 		matches := c.regexp.FindStringSubmatch(SourceStr)
 		if len(matches) == 0 {
 			return nil
@@ -338,145 +523,35 @@ func (c *Chain) Execute(SourceStr string) (string, string, int64) {
 
 //////////////////////////////////////////////////////////////////////////////
 
-func readStdIn() {
-	mergeChan := make(chan map[string]*Data, Go*AddSizeChan)
-	ResultChan := make(chan map[string]*Data, Go*AddSizeChan) // канал в который будет помещаться результат парсинга
-	mergeGroup := &sync.WaitGroup{}
-	resultGroup := &sync.WaitGroup{}
-
-	for i := 0; i < Go; i++ {
-		mergeGroup.Add(1)
-		go goMergeData(mergeChan, ResultChan, mergeGroup)
-	}
-
-	resultGroup.Add(1)
-	go goPrettyPrint(ResultChan, resultGroup)
-
-	in := bufio.NewScanner(os.Stdin)
-	ParsStream(in, ResultChan)
-
-	close(mergeChan)
-	mergeGroup.Wait()
-	close(ResultChan)
-	resultGroup.Wait()
-}
-
-func ParsStream(Scan *bufio.Scanner, mergeChan chan<- map[string]*Data) {
-
-	inChan := make(chan *string, Go) // канал в который будет писаться исходные данные для парсенга
-	//outChan := make(chan map[string]*Data, Go*100) // канал в который будет помещаться результат парсинга
-	//dirChan := make(chan string, Go)           // канал в который будет писаться путь к временным директориям
-	WriteGroup := &sync.WaitGroup{} // Група для ожидания завершения горутин работающих с каналом inChan
-	//ReadGroup := &sync.WaitGroup{}  // Група для ожидания завершения горутин работающих с каналом outChan
-	//ReadDirGroup := &sync.WaitGroup{}          // Група для ожидания завершения горутин работающих с каналом dirChan
-
-	pattern := `(?mi)\d\d:\d\d\.\d+[-]\d+`
-	re := regexp.MustCompile(pattern)
-
-	//runWorkers(Go, inChan, outChan, WriteGroup)
-
-	for i := 0; i < Go; i++ {
-		WriteGroup.Add(1)
-		go startWorker(inChan, mergeChan, WriteGroup)
-	}
-
-	buff := make([]string, 1)
-	writeChan := func() {
-		part := strings.Join(buff, "\n")
-		inChan <- &part
-		buff = nil // Очищаем
-	}
-
-	for ok := Scan.Scan(); ok == true; {
-		txt := Scan.Text()
-		if ok := re.MatchString(txt); ok {
-			writeChan()
-			buff = append(buff, txt)
-		} else {
-			// Если мы в этом блоке, значит у нас многострочное событие, накапливаем строки в буфер
-			buff = append(buff, txt)
-		}
-
-		ok = Scan.Scan()
-	}
-	if len(buff) > 0 {
-		writeChan()
-	}
-
-	close(inChan) // Закрываем канал на для чтения
-	WriteGroup.Wait()
-	//close(outChan)
-	//ReadGroup.Wait()
-	//close(dirChan)
-	//ReadDirGroup.Wait()
-}
-
-func PrettyPrint(inData map[string]*Data) {
-	// переводим map в массив
-	len := len(inData)
-	array := make([]*Data, len, len)
-	i := 0
-	for _, value := range inData {
-		array[i] = value
-		i++
-	}
-
-	Top = int(math.Min(float64(Top), float64(len)))
-	if SortByCount {
-		SortCount := func(i, j int) bool { return array[i].count > array[j].count }
-		sort.Slice(array, SortCount)
-	} else if SortByValue {
-		SortValue := func(i, j int) bool { return array[i].value > array[j].value }
-		sort.Slice(array, SortValue)
-	}
-	for id := range array[:Top] {
-		OutStr := array[id].OutStr
-		OutStr = strings.Replace(OutStr, "%count%", fmt.Sprintf("%d", array[id].count), -1)
-		OutStr = strings.Replace(OutStr, "%Value%", fmt.Sprintf("%d", array[id].value), -1)
-
-		fmt.Println(OutStr + "\n")
-	}
-}
-
-func ParsPart(Blob *string) map[string]*Data {
-	Str := *Blob
-	if Str == "" {
-		return nil
-	}
-
-	RepChain := ChainPool.Get().(*Chain)
-	key, data, value := RepChain.Execute(Str)
-	result := Data{OutStr: data, value: value, count: 1}
-	return map[string]*Data{getHash(key): &result}
-}
-
 ///////////////////////// Legacy ///////////////////////////////////////////
 
 func MergeFiles(DirPath string) {
-	commonData := make(map[string]*Data)
-	for _, filePath := range GetFiles(DirPath) {
+	commonData := make(mapData)
+	Files, _ := GetFiles(DirPath)
+	for _, filePath := range Files {
 		if Data, er := deSerialization(filePath); er == nil {
-			MergeData(Data, commonData)
+			commonData.MergeData(Data)
 		}
 	}
 
-	SerializationAndSave(commonData, DirPath)
+	commonData.SerializationAndSave(DirPath)
 
 }
 
 func MergeDirs(Dirs []string) string {
-	commonData := make(map[string]*Data)
+	commonData := make(mapData)
 
 	for _, dir := range Dirs {
-		for _, file := range GetFiles(dir) {
+		Files, _ := GetFiles(dir)
+		for _, file := range Files {
 			if Data, er := deSerialization(file); er == nil {
-				MergeData(Data, commonData)
+				commonData.MergeData(Data)
 			}
 		}
 		os.RemoveAll(dir)
 	}
 	TempDir, _ := ioutil.TempDir("", "")
-	SerializationAndSave(commonData, TempDir)
+	commonData.SerializationAndSave(TempDir)
 	return TempDir
 }
 
