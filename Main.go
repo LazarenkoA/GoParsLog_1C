@@ -105,16 +105,21 @@ func main() {
 func readStdIn() {
 	mergeChan := make(chan mapData, Go*AddSizeChan)
 	mergeGroup := &sync.WaitGroup{}
+	resultChan := make(chan mapData, Go*AddSizeChan)
+	resultGroup := new(sync.WaitGroup)
 
 	for i := 0; i < Go; i++ {
-		go goMergeData(mergeChan, mergeGroup)
+		go goMergeData(mergeChan, resultChan, mergeGroup)
 	}
+	go goPrettyPrint(resultChan, resultGroup) // Горутина для объеденения результата 10 потоков
 
 	in := bufio.NewScanner(os.Stdin)
 	ParsStream(in, BuildChain(), mergeChan)
 
 	close(mergeChan)
 	mergeGroup.Wait()
+	close(resultChan)
+	resultGroup.Wait()
 }
 
 func ParsStream(Scan *bufio.Scanner, RepChain *Chain, mergeChan chan<- mapData) {
@@ -177,6 +182,11 @@ func PrettyPrint(inData mapData) {
 		SortValue := func(i, j int) bool { return array[i].value > array[j].value }
 		sort.Slice(array, SortValue)
 	}
+
+	/* for k, v := range inData {
+		fmt.Println("Ключ: ", k, "\n", "Значение", v.OutStr)
+	} */
+
 	for id := range array[:Top] {
 		OutStr := array[id].OutStr
 		OutStr = strings.Replace(OutStr, "%count%", fmt.Sprintf("%d", array[id].count), -1)
@@ -240,7 +250,7 @@ func ReadInfoChan(infoChan <-chan int64, Fullsize *int64) {
 	}
 }
 
-func goMergeData(outChan <-chan mapData, G *sync.WaitGroup) {
+func goMergeData(outChan <-chan mapData, resultChan chan<- mapData, G *sync.WaitGroup) {
 	G.Add(1)
 	defer G.Done()
 
@@ -250,7 +260,7 @@ func goMergeData(outChan <-chan mapData, G *sync.WaitGroup) {
 		runtime.Gosched() // Передаем управление другой горутине.
 	}
 
-	PrettyPrint(Data)
+	resultChan <- Data
 }
 
 func goPrettyPrint(resultChan <-chan mapData, G *sync.WaitGroup) {
@@ -275,7 +285,7 @@ func startWorker(inChan <-chan *string, outChan chan<- mapData, group *sync.Wait
 	}
 }
 
-func ParsFile(FilePath string, mergeChan chan<- mapData, infoChan chan<- int64, Chain *Chain, group *sync.WaitGroup) {
+func ParsFile(FilePath string, mergeChan chan<- mapData, Chain *Chain, group *sync.WaitGroup) {
 	defer group.Done()
 
 	var file *os.File
@@ -420,14 +430,16 @@ func FindFiles(rootDir string) {
 	group := new(sync.WaitGroup)                    // Группа для горутин по файлам
 	mergeGroup := new(sync.WaitGroup)               // Группа для горутин которые делают первичное объеденение
 	mergeChan := make(chan mapData, Go*AddSizeChan) // Канал в который будут помещаться данные от пула воркеров, для объеденения
-	infoChan := make(chan int64, 2)                 // Информационный канал, в него пишется размеры файлов
+	resultChan := make(chan mapData, Go*AddSizeChan)
+	resultGroup := new(sync.WaitGroup)
+	//infoChan := make(chan int64, 2)                 // Информационный канал, в него пишется размеры файлов
 	Files, size := GetFiles(rootDir)
 	Chain := BuildChain()
 
 	for i := 0; i < Go; i++ {
-		go goMergeData(mergeChan, mergeGroup)
+		go goMergeData(mergeChan, resultChan, mergeGroup)
 	}
-	//go goPrettyPrint(ResultChan, resultGroup)
+	go goPrettyPrint(resultChan, resultGroup) // Горутина для объеденения результата 10 потоков
 	//if v {
 	//	go ReadInfoChan(infoChan, &size)
 	//}
@@ -439,14 +451,16 @@ func FindFiles(rootDir string) {
 	for _, File := range Files {
 		if strings.HasSuffix(File, "log") {
 			group.Add(1)
-			go ParsFile(File, mergeChan, infoChan, Chain, group)
+			go ParsFile(File, mergeChan, Chain, group)
 		}
 	}
 
 	group.Wait()
 	close(mergeChan)
-	close(infoChan)
+	//close(infoChan)
 	mergeGroup.Wait()
+	close(resultChan)
+	resultGroup.Wait()
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -475,7 +489,6 @@ func BuildChain() *Chain {
 	}
 
 	Element2 := Chain{
-		//preCondition:   func(In string) bool { return strings.Contains(In, ",CALL") },
 		regexp:         regexp.MustCompile(`(?si)[,]CALL(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Context=(?P<Context>[^,]+)(?:.+?)MemoryPeak=(?P<Value>[\d]+)`),
 		NextElement:    &Element1,
 		AgregateFileld: []string{"DB", "Context"},
@@ -483,7 +496,6 @@ func BuildChain() *Chain {
 	}
 
 	Element3 := Chain{
-		//preCondition:   func(In string) bool { return strings.Contains(In, ",EXCP") },
 		regexp:         regexp.MustCompile(`(?si)[,]EXCP,(?:.*?)process=(?P<Process>[^,]+)(?:.*?)Descr=(?P<Context>[^,]+)`),
 		NextElement:    &Element2,
 		AgregateFileld: []string{"Process", "Context"},
@@ -494,9 +506,6 @@ func BuildChain() *Chain {
 
 func (c *Chain) Execute(SourceStr string) (string, string, int64) {
 	exRegExp := func() map[string]string {
-		/* if !c.preCondition(SourceStr) {
-			return nil
-		} */
 		matches := c.regexp.FindStringSubmatch(SourceStr)
 		if len(matches) == 0 {
 			return nil
