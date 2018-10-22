@@ -413,6 +413,10 @@ func ToUnify(inStr string) string {
 }
 
 func FindFiles(rootDir string) {
+	if _, err := os.Stat(rootDir); os.IsNotExist(err) {
+		panic(fmt.Sprintf("Файл %q не существует", rootDir))
+	}
+
 	group := new(sync.WaitGroup)                    // Группа для горутин по файлам
 	mergeGroup := new(sync.WaitGroup)               // Группа для горутин которые делают первичное объеденение
 	mergeChan := make(chan mapData, Go*AddSizeChan) // Канал в который будут помещаться данные от пула воркеров, для объеденения
