@@ -37,6 +37,11 @@ type ImapData interface {
 	MergeData(inData ImapData)
 }
 
+type IProfTime interface {
+	Start() *ProfTime
+	Stop()
+}
+
 type Chain struct {
 	OutPattern     string
 	NextElement    *Chain
@@ -51,6 +56,10 @@ var ChainPool = sync.Pool{
 	},
 }
 
+type ProfTime struct {
+	StartTime time.Time
+}
+
 type mapData map[string]*Data
 
 const AddSizeChan = 10
@@ -60,6 +69,9 @@ var Top, Go int
 var RootDir string
 
 func main() {
+	P := new(ProfTime)
+	defer P.Start().Stop()
+
 	flag.BoolVar(&SortByCount, "SortByCount", false, "Сортировка по количеству вызовов (bool)")
 	flag.BoolVar(&SortByValue, "SortByValue", false, "Сортировка по значению (bool)")
 	flag.BoolVar(&IO, "io", false, "Флаг указывающий, что данные будут поступать из StdIn (bool)")
@@ -336,6 +348,16 @@ func deSerialization(filePath string) (mapData, error) {
 
 //////////////////////// Системные методы ////////////////////////////////////
 
+func (t *ProfTime) Start() *ProfTime {
+	t.StartTime = time.Now()
+	return t
+}
+
+func (t *ProfTime) Stop() {
+	diff := time.Now().Sub(t.StartTime)
+	fmt.Printf("Код выполнялся: %v\n", diff)
+}
+
 func (this mapData) MergeData(inData mapData) {
 	for k, value := range inData {
 		if _, exist := this[k]; exist {
@@ -392,8 +414,6 @@ func ToUnify(inStr string) string {
 }
 
 func FindFiles(rootDir string) {
-	start := time.Now()
-
 	group := new(sync.WaitGroup)                    // Группа для горутин по файлам
 	mergeGroup := new(sync.WaitGroup)               // Группа для горутин которые делают первичное объеденение
 	mergeChan := make(chan mapData, Go*AddSizeChan) // Канал в который будут помещаться данные от пула воркеров, для объеденения
@@ -424,9 +444,6 @@ func FindFiles(rootDir string) {
 	close(mergeChan)
 	close(infoChan)
 	mergeGroup.Wait()
-
-	elapsed := time.Now().Sub(start)
-	fmt.Printf("Код выполнялся: %v\n", elapsed)
 }
 
 //////////////////////////////////////////////////////////////////////////////
