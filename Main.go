@@ -69,8 +69,7 @@ var Top, Go int
 var RootDir string
 
 func main() {
-	P := new(ProfTime)
-	defer P.Start().Stop()
+	defer new(ProfTime).Start().Stop()
 
 	flag.BoolVar(&SortByCount, "SortByCount", false, "Сортировка по количеству вызовов (bool)")
 	flag.BoolVar(&SortByValue, "SortByValue", false, "Сортировка по значению (bool)")
