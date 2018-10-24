@@ -18,7 +18,8 @@ import (
 	"time"
 
 	"runtime/pprof"
-	. "./Tools"
+
+	. "github.com/LazarenkoA/GoParsLog_1C/Tools"
 )
 
 //var Tools, error = build.Import("Tools/Chain", "", build.IgnoreVendor)
