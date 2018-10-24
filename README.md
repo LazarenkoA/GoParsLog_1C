@@ -19,16 +19,16 @@
 
 Пример использования:
 
-ParsLogs.exe  -RootDir=C:\Logs
+	ParsLogs.exe  -RootDir=C:\Logs
 
 В данном случае поиск логов будет производиться по каталогу "C:\Logs"
 
 Также можно применять в тандеме с grep'ом
 
-grep '' -rh --include '*.log' | ParsLogs.exe -io
+	grep '' -rh --include '*.log' | ParsLogs.exe -io
 
 Пример сочетания параметров
 
-ParsLogs.exe  -RootDir=C:\Logs -Top=10 -SortByCount
+	ParsLogs.exe  -RootDir=C:\Logs -Top=10 -SortByCount
 
 Будет выведено 10 результатов отсортированных по количеству
