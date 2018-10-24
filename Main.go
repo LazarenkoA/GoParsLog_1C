@@ -18,8 +18,6 @@ import (
 	"time"
 
 	"runtime/pprof"
-
-	. "./Chain"
 	. "./Tools"
 )
 

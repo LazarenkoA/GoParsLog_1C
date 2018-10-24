@@ -1,4 +1,4 @@
-package CommonTools
+package Tools
 
 import (
 	"crypto/md5"
