@@ -47,30 +47,20 @@ type mapData map[string]*Data
 
 const AddSizeChan = 10
 
-var SortByCount, SortByValue, IO, v bool
+var SortByCount, SortByValue, IO, v, cpuprofile, memprofile bool
 var Top, Go int
-var RootDir string
+var RootDir, Event string
 
 func main() {
 	defer new(ProfTime).Start().Stop()
 
-	flag.BoolVar(&SortByCount, "SortByCount", false, "Сортировка по количеству вызовов (bool)")
-	flag.BoolVar(&SortByValue, "SortByValue", false, "Сортировка по значению (bool)")
-	flag.BoolVar(&IO, "io", false, "Флаг указывающий, что данные будут поступать из StdIn (bool)")
-	//flag.BoolVar(&v, "v", false, "Флаг включающий вывод лога. Не используется при чтении данных из потока StdIn (bool)")
-	flag.IntVar(&Top, "Top", 100, "Ограничение на вывод по количеству записей")
-	flag.IntVar(&Go, "Go", 10, "Количество воркеров которые будут обрабатывать файл")
-	flag.StringVar(&RootDir, "RootDir", "", "Корневая директория")
+	parsFlag()
 
-	cpuprofile := flag.Bool("cpuprof", false, "Профилирование CPU (bool)")
-	memprofile := flag.Bool("memprof", false, "Профилирование памяти (bool)")
-	flag.Parse()
-
-	if *cpuprofile {
+	if cpuprofile {
 		StartCPUProf()
 		defer pprof.StopCPUProfile()
 	}
-	if *memprofile {
+	if memprofile {
 		StartMemProf()
 		defer pprof.StopCPUProfile()
 	}
@@ -83,6 +73,21 @@ func main() {
 		panic("Не определены входящие данные")
 	}
 
+}
+
+func parsFlag() {
+	flag.BoolVar(&SortByCount, "SortByCount", false, "Сортировка по количеству вызовов (bool)")
+	flag.BoolVar(&SortByValue, "SortByValue", false, "Сортировка по значению (bool)")
+	flag.BoolVar(&IO, "io", false, "Флаг указывающий, что данные будут поступать из StdIn (bool)")
+	//flag.BoolVar(&v, "v", false, "Флаг включающий вывод лога. Не используется при чтении данных из потока StdIn (bool)")
+	flag.IntVar(&Top, "Top", 100, "Ограничение на вывод по количеству записей")
+	flag.IntVar(&Go, "Go", 10, "Количество воркеров которые будут обрабатывать файл")
+	flag.StringVar(&RootDir, "RootDir", "", "Корневая директория")
+	flag.BoolVar(&cpuprofile, "cpuprof", false, "Профилирование CPU (bool)")
+	flag.BoolVar(&memprofile, "memprof", false, "Профилирование памяти (bool)")
+	//flag.StringVar(&Event, "Event", "", "Событие ТЖ для группировки")
+
+	flag.Parse()
 }
 
 func readStdIn() {

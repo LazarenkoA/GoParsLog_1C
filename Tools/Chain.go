@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-
 )
 
 type IChain interface {
@@ -27,7 +26,7 @@ var ChainPool = sync.Pool{
 }
 
 func BuildChain() *Chain {
-	/* Element0 := Chain{
+	Element0 := Chain{
 		regexp:         regexp.MustCompile(`(?si)[\d]+:[\d]+\.[\d]+[-](?P<Value>[\d]+)[,]CALL(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Module=(?P<Module>[^,]+)(?:.+?)Method=(?P<Method>[^,]+)`),
 		AgregateFileld: []string{"event", "DB", "Module", "Method"},
 		OutPattern:     "(%DB%) CALL, количество - %count%, duration - %Value%\n%Module%.%Method%",
@@ -38,29 +37,30 @@ func BuildChain() *Chain {
 		NextElement:    &Element0,
 		AgregateFileld: []string{"event", "DB", "Context"},
 		OutPattern:     "(%DB%) %event%, количество - %count%, duration - %Value%\n%Context%",
-	} */
+	}
 
-	Element1 := Chain{
+	Element2 := Chain{
 		//preCondition:   func(In string) bool { return strings.Contains(In, ",CALL") },
 		regexp:         regexp.MustCompile(`(?si)[,]CALL(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Module=(?P<Module>[^,]+)(?:.+?)Method=(?P<Method>[^,]+)(?:.+?)MemoryPeak=(?P<Value>[\d]+)`),
+		NextElement:    &Element1,
 		AgregateFileld: []string{"event", "DB", "Module", "Method"},
 		OutPattern:     "(%DB%) CALL, количество - %count%, MemoryPeak - %Value%\n%Module%.%Method%",
 	}
 
-	Element2 := Chain{
+	Element3 := Chain{
 		regexp:         regexp.MustCompile(`(?si)[,]CALL(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Context=(?P<Context>[^,]+)(?:.+?)MemoryPeak=(?P<Value>[\d]+)`),
-		NextElement:    &Element1,
+		NextElement:    &Element2,
 		AgregateFileld: []string{"DB", "Context"},
 		OutPattern:     "(%DB%) CALL, количество - %count%, MemoryPeak - %Value%\n%Context%",
 	}
 
-	Element3 := Chain{
+	Element4 := Chain{
 		regexp:         regexp.MustCompile(`(?si)[,]EXCP,(?:.*?)process=(?P<Process>[^,]+)(?:.*?)Descr=(?P<Context>[^,]+)`),
-		NextElement:    &Element2,
+		NextElement:    &Element3,
 		AgregateFileld: []string{"Process", "Context"},
 		OutPattern:     "(%Process%) EXCP, количество - %count%\n%Context%",
 	}
-	return &Element3
+	return &Element4
 }
 
 func (c *Chain) Execute(SourceStr string) (string, string, int64) {
