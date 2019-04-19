@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/gob"
+	"encoding/xml"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -17,9 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"runtime/pprof"
-
 	. "GoParsLog_1C/Tools"
+	"runtime/pprof"
 )
 
 //var Tools, error = build.Import("Tools/Chain", "", build.IgnoreVendor)
@@ -49,13 +49,12 @@ const AddSizeChan = 10
 
 var SortByCount, SortByValue, IO, v, cpuprofile, memprofile bool
 var Top, Go int
-var RootDir, Event string
+var RootDir, Event, confPath string
 
 func main() {
 	defer new(ProfTime).Start().Stop()
 
 	parsFlag()
-
 	if cpuprofile {
 		StartCPUProf()
 		defer pprof.StopCPUProfile()
@@ -85,9 +84,34 @@ func parsFlag() {
 	flag.StringVar(&RootDir, "RootDir", "", "Корневая директория")
 	flag.BoolVar(&cpuprofile, "cpuprof", false, "Профилирование CPU (bool)")
 	flag.BoolVar(&memprofile, "memprof", false, "Профилирование памяти (bool)")
+	flag.StringVar(&confPath, "confPath", "", "Путь к конфигу")
 	//flag.StringVar(&Event, "Event", "", "Событие ТЖ для группировки")
 
 	flag.Parse()
+}
+
+func readConf() PatternList {
+	if confPath == "" {
+		return PatternList{}
+	}
+	if _, err := os.Stat(confPath); os.IsNotExist(err) {
+		fmt.Printf("Конфигурационный файл %q не найден\n", confPath)
+		return PatternList{}
+	}
+
+	file, err := ioutil.ReadFile(confPath)
+	if err != nil {
+		fmt.Printf("Ошибка открытия файла %q\n", confPath)
+		return PatternList{}
+	}
+
+	result := PatternList{}
+	// XML потому что в нем можно комментарии оставлять, в отличии от JSON
+	if err = xml.Unmarshal(file, &result); err != nil {
+		fmt.Printf("Ошибка десериализации файла %q\n %v", confPath, err.Error())
+		return PatternList{}
+	}
+	return result
 }
 
 func readStdIn() {
@@ -102,7 +126,7 @@ func readStdIn() {
 	go goPrettyPrint(resultChan, resultGroup) // Горутина для объеденения результата 10 потоков
 
 	in := bufio.NewScanner(os.Stdin)
-	ParsStream(in, BuildChain(), mergeChan)
+	ParsStream(in, BuildChain(readConf()), mergeChan)
 
 	close(mergeChan)
 	mergeGroup.Wait()
@@ -400,7 +424,7 @@ func FindFiles(rootDir string) {
 	resultGroup := new(sync.WaitGroup)
 	//infoChan := make(chan int64, 2)                 // Информационный канал, в него пишется размеры файлов
 	Files, size := GetFiles(rootDir)
-	Chain := BuildChain()
+	Chain := BuildChain(readConf())
 
 	for i := 0; i < Go; i++ {
 		go goMergeData(mergeChan, resultChan, mergeGroup)

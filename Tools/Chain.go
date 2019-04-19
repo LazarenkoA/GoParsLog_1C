@@ -4,7 +4,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 type IChain interface {
@@ -19,39 +18,86 @@ type Chain struct {
 	AgregateFileld []string
 }
 
-var ChainPool = sync.Pool{
+type PatternsData struct {
+	AgregateFileld []string
+	OutPattern     string
+	RegexpPattern  string
+}
+
+type PatternList struct {
+	List []*PatternsData `xml:"PatternsData"`
+}
+
+/* var ChainPool = sync.Pool{
 	New: func() interface{} {
 		return BuildChain()
 	},
-}
+} */
 
-func BuildChain() *Chain {
-	Element0 := Chain{
+func BuildChain(P PatternList) *Chain {
+	if len(P.List) == 0 {
+		// цепочка по дефолту
+
+		Element0 := Chain{
+			regexp:         regexp.MustCompile(`(?si)[\d]+:[\d]+\.[\d]+[-](?P<Value>[\d]+)[,]CALL(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Module=(?P<Module>[^,]+)(?:.+?)Method=(?P<Method>[^,]+)`),
+			AgregateFileld: []string{"event", "DB", "Module", "Method"},
+			OutPattern:     "(%DB%) CALL, количество - %count%, duration - %Value%\n%Module%.%Method%",
+		}
+
+		Element1 := Chain{
+			regexp:         regexp.MustCompile(`(?si)[\d]+:[\d]+\.[\d]+[-](?P<Value>[\d]+)[,](?P<event>[^,]+)(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)(Context=(?P<Context>[^,]+))`),
+			NextElement:    &Element0,
+			AgregateFileld: []string{"event", "DB", "Context"},
+			OutPattern:     "(%DB%) %event%, количество - %count%, duration - %Value%\n%Context%",
+		}
+
+		return &Element1
+	} else {
+		var lastElement *Chain
+		for id, elem := range P.List {
+			cohesion := func(currentElem *Chain) {
+				if id != 0 {
+					currentElem.NextElement = lastElement
+				}
+				lastElement = currentElem
+			}
+			Element := Chain{
+				regexp:         regexp.MustCompile(elem.RegexpPattern),
+				AgregateFileld: elem.AgregateFileld,
+				OutPattern:     elem.OutPattern,
+			}
+			cohesion(&Element)
+		}
+
+		return lastElement
+	}
+
+	/* Element0 := Chain{
 		regexp:         regexp.MustCompile(`(?si)[\d]+:[\d]+\.[\d]+[-](?P<Value>[\d]+)[,]CALL(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Module=(?P<Module>[^,]+)(?:.+?)Method=(?P<Method>[^,]+)`),
 		AgregateFileld: []string{"event", "DB", "Module", "Method"},
 		OutPattern:     "(%DB%) CALL, количество - %count%, duration - %Value%\n%Module%.%Method%",
-	}
+	} */
 
-	Element1 := Chain{
-		regexp:         regexp.MustCompile(`(?si)[\d]+:[\d]+\.[\d]+[-](?P<Value>[\d]+)[,](?P<event>[^,]+)(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)(Context=(?P<Context>[^,]+))`),
+	/* Element1 := Chain{
+		regexp: regexp.MustCompile(`(?si)[\d]+:[\d]+\.[\d]+[-](?P<Value>[\d]+)[,](?P<event>[^,]+)(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)(Context=(?P<Context>[^,]+))`),
 		NextElement:    &Element0,
 		AgregateFileld: []string{"event", "DB", "Context"},
 		OutPattern:     "(%DB%) %event%, количество - %count%, duration - %Value%\n%Context%",
-	}
+	} */
 
-	Element2 := Chain{
+	/* Element2 := Chain{
 		//preCondition:   func(In string) bool { return strings.Contains(In, ",CALL") },
-		regexp:         regexp.MustCompile(`(?si)[,]CALL(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Module=(?P<Module>[^,]+)(?:.+?)Method=(?P<Method>[^,]+)(?:.+?)MemoryPeak=(?P<Value>[\d]+)`),
-		NextElement:    &Element1,
+		regexp: regexp.MustCompile(`(?si)[,]CALL(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Module=(?P<Module>[^,]+)(?:.+?)Method=(?P<Method>[^,]+)(?:.+?)Memory=(?P<Value>[\d]+)`),
+		//NextElement:    &Element1,
 		AgregateFileld: []string{"event", "DB", "Module", "Method"},
-		OutPattern:     "(%DB%) CALL, количество - %count%, MemoryPeak - %Value%\n%Module%.%Method%",
+		OutPattern:     "(%DB%) CALL, количество - %count%, Memory - %Value%\n%Module%.%Method%",
 	}
 
 	Element3 := Chain{
-		regexp:         regexp.MustCompile(`(?si)[,]CALL(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Context=(?P<Context>[^,]+)(?:.+?)MemoryPeak=(?P<Value>[\d]+)`),
+		regexp:         regexp.MustCompile(`(?si)[,]CALL(?:.*?)p:processName=(?P<DB>[^,]+)(?:.+?)Context=(?P<Context>[^,]+)(?:.+?)Memory=(?P<Value>[\d]+)`),
 		NextElement:    &Element2,
 		AgregateFileld: []string{"DB", "Context"},
-		OutPattern:     "(%DB%) CALL, количество - %count%, MemoryPeak - %Value%\n%Context%",
+		OutPattern:     "(%DB%) CALL, количество - %count%, Memory - %Value%\n%Context%",
 	}
 
 	Element4 := Chain{
@@ -60,7 +106,7 @@ func BuildChain() *Chain {
 		AgregateFileld: []string{"Process", "Context"},
 		OutPattern:     "(%Process%) EXCP, количество - %count%\n%Context%",
 	}
-	return &Element4
+	return &Element4 */
 }
 
 func (c *Chain) Execute(SourceStr string) (string, string, int64) {
