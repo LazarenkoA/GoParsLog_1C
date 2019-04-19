@@ -187,13 +187,12 @@ func PrettyPrint(inData mapData) {
 	}
 
 	Top = int(math.Min(float64(Top), float64(len)))
-	if SortByCount {
-		SortCount := func(i, j int) bool { return array[i].count > array[j].count }
-		sort.Slice(array, SortCount)
-	} else if SortByValue {
-		SortValue := func(i, j int) bool { return array[i].value > array[j].value }
-		sort.Slice(array, SortValue)
+	SortFunc := func(i, j int) bool { return array[i].count > array[j].count }
+	if SortByValue {
+		SortFunc = func(i, j int) bool { return array[i].value > array[j].value }
 	}
+
+	sort.Slice(array, SortFunc)
 
 	/* for k, v := range inData {
 		fmt.Println("Ключ: ", k, "\n", "Значение", v.OutStr)
